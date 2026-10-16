@@ -1,39 +1,17 @@
 # 本站的部署覆写。docker compose 会自动加载这个文件，和 docker-compose.yml 合并。
 #
-# 为什么单独放一个文件：这些改动只对本站成立（域名未备案、用腾讯云 DNS、走非标端口），
-# 不属于框架的通用配置。放在这里，docker-compose.yml 和 deploy/Caddyfile 保持原样，
-# 以后跟上游更新不会冲突。
+# 为什么单独放一个文件：这里的改动只对本站成立（域名没备案，读者只能从 IP 加端口进来），
+# 不属于框架的通用配置。放在这里，docker-compose.yml 保持原样，以后跟上游更新不会冲突。
 #
-# 用法不变：docker compose --profile https up -d --build
+# 用法：docker compose up -d
 #
-# 注意 ports 和 volumes 用了 !override 标签：compose 默认会把这两个列表「拼接」而不是替换，
-# 不写 !override 就会同时挂上框架自带的 deploy/Caddyfile（挂到同一个容器路径）并继续发布 80/443。
+# 这里只「追加」一条 IPv6 回环的端口映射。compose 合并时 ports 是拼接而不是替换，
+# 框架自带的那条 ${PORT:-3000}:3000 会原样保留，所以不需要 !override 整段替换
+# ——那样反而会把框架那条顶掉，将来上游改了端口写法我们也跟不到。
 services:
-  caddy:
-    build:
-      context: .
-      dockerfile: deploy/caddy/Dockerfile
-    image: aihot-caddy
-    ports: !override
-      - "${SITE_PORT:-4321}:${SITE_PORT:-4321}"
-      # Caddy 会在响应头广播 alt-svc: h3（HTTP/3 走 UDP）。不发布 UDP 的话浏览器会先试
-      # QUIC、失败再回退到 TCP，每个新访客多花几十毫秒。发布出来即可；安全组不放行 UDP
-      # 也不影响访问，只是回到上面的回退行为。
-      - "${SITE_PORT:-4321}:${SITE_PORT:-4321}/udp"
-    environment:
-      SITE_DOMAIN: ${SITE_DOMAIN:-localhost}
-      SITE_PORT: ${SITE_PORT:-4321}
-      TENCENTCLOUD_SECRET_ID: ${TENCENTCLOUD_SECRET_ID:-}
-      TENCENTCLOUD_SECRET_KEY: ${TENCENTCLOUD_SECRET_KEY:-}
-    volumes: !override
-      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy:/data
-
-  # web 只给本机用：Caddy 走 compose 内网访问 web:3000，主机侧只绑回环。
-  # 框架默认的 PORT=127.0.0.1:3000 只绑 IPv4 回环，这里补上 IPv6 回环，
+  # web 直接对公网发布。框架自带的那条只绑 IPv4 的所有网卡，这里补上 IPv6 回环，
   # 免得哪天 localhost 被解析成 ::1 时连不上（本机当前 /etc/hosts 里 localhost 只指 127.0.0.1）。
-  # 注意第二行写死了 3000：改了 PORT 的端口号，这里要跟着改。
+  # 注意端口号写死了 3000：改了 .env 里 PORT 的端口号，这里要跟着改。
   web:
-    ports: !override
-      - "${PORT:-3000}:3000"
+    ports:
       - "[::1]:3000:3000"
