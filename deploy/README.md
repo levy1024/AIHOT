@@ -29,7 +29,7 @@
 
 ## 二、前置准备
 
-在新主机上动手之前，把这四件事准备好：
+在新主机上动手之前，把这五件事准备好：
 
 1. **域名解析**：`embedded.news` 的 A 记录指向新主机的公网 IP。用 `getent hosts embedded.news`
    确认解析结果就是那台机器的公网 IP。
@@ -51,14 +51,19 @@
 
 4. **一个模型服务的 API Key**（当前用的是 DeepSeek）。
 
+5. **新主机要能访问 GitHub**。大陆主机的 `github.com` 通常连不通（`api.github.com` 往往可以），
+   连不通就 `git clone` 不了。本机用的办法是走 **`ssh.github.com:443`**，配置见第八节。
+
 ---
 
 ## 三、部署步骤
 
 ### 1. 拿代码
 
+**先按第八节配好 SSH 通道**，否则大陆主机连不上 `github.com`，下面的克隆会一直挂着：
+
 ```bash
-git clone https://github.com/levy1024/AIHOT.git myhot
+git clone git@github.com:levy1024/AIHOT.git myhot
 cd myhot
 ```
 
@@ -328,7 +333,8 @@ Caddy 会在响应头广播 `alt-svc: h3=":4321"`（HTTP/3 走 UDP）。如果�
 - **更新代码**：
 
   ```bash
-  git pull upstream main     # 或 origin main，看你要跟哪个
+  git pull origin main       # 自己的 fork
+  git pull upstream main     # 上游；需要先按第八节处理，否则拉不动
   docker compose --profile https up -d --build
   ```
 
@@ -337,3 +343,73 @@ Caddy 会在响应头广播 `alt-svc: h3=":4321"`（HTTP/3 走 UDP）。如果�
   `TENCENTCLOUD_*`。备份 `.env` 请用安全的渠道，别丢进版本库。
 - **`worker` 停止有 210 秒宽限期**，这是为了防止正在跑的付费模型调用被中途杀掉（会留下已付费但
   状态未知的回执）。所以重启时别用 `docker compose kill`。
+
+---
+
+## 八、让新主机能连 GitHub（逃开对 `github.com` 的封锁）
+
+大陆主机上 `github.com:443` 通常被墙，但 **`ssh.github.com:443` 一般可达**，把 GitHub 的 SSH 连接
+改走 443 端口即可。实测：本机 `github.com` 超时、`api.github.com` 与 `ssh.github.com:443` 均通。
+
+### 1. 生成密钥
+
+```bash
+ssh-keygen -t ed25519 -C "$(hostname)" -f ~/.ssh/id_ed25519_gh -N ""
+```
+
+`-N ""` 是不设口令，便于无人值守推送。代价是**这台机器被攻破就等于这把钥匙泄露**，
+所以下面用**部署密钥**而不是账号级 SSH 密钥把它限制在单个仓库内。
+
+### 2. 把公钥加成部署密钥（只对 `levy1024/AIHOT` 有效）
+
+有 `gh` 且已登录（`gh auth login`）时：
+
+```bash
+gh api --method POST repos/levy1024/AIHOT/keys \
+  -f title="$(hostname)" -f key="$(cat ~/.ssh/id_ed25519_gh.pub)" -F read_only=false
+```
+
+`read_only=false` 是**可写**（能 push）；只拉不推的话用 `true` 更安全。
+没装 `gh` 就去 GitHub 网页端：仓库 → Settings → Deploy keys → Add deploy key，勾上
+"Allow write access"。
+
+### 3. 配置 SSH 走 443
+
+写进 `~/.ssh/config`：
+
+```
+Host github.com
+    HostName ssh.github.com
+    Port 443
+    User git
+    IdentityFile ~/.ssh/id_ed25519_gh
+    IdentitiesOnly yes
+```
+
+然后加入主机密钥并**核对指纹**，别盲信第一次连接：
+
+```bash
+ssh-keyscan -p 443 -t ed25519 ssh.github.com | ssh-keygen -lf -
+# 应输出：SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU（GitHub 官方公布的 Ed25519 指纹）
+ssh-keyscan -p 443 -t ed25519 ssh.github.com | sed 's/^ssh.github.com/[ssh.github.com]:443/' >> ~/.ssh/known_hosts
+```
+
+### 4. 验证并切换 remote
+
+```bash
+ssh -T git@github.com
+# 回显 "Hi levy1024/AIHOT! You've successfully authenticated" 即成功。
+#   注意回显里是 用户名/仓库名，说明用的是仓库级部署密钥；账号级密钥只会显示用户名。
+
+git remote set-url origin git@github.com:levy1024/AIHOT.git
+```
+
+### 已知限制：`upstream` 拉不动
+
+部署密钥**只对该仓库有效**，所以 `upstream`（`KKKKhazix/AIHOT`）走 SSH 会被拒；而它默认的 HTTPS
+地址又指向被墙的 `github.com`，于是 `git fetch upstream` 会卡住。要用上游更新，二选一：
+
+- 把同一把公钥也加到**账号级** SSH 密钥（GitHub → Settings → SSH and GPG keys），并在 `~/.ssh/config`
+  的 `Host github.com` 段里保留 `IdentityFile`——账号级密钥能访问所有公开仓库，但权限范围是整个账号；
+- 或者给这台机器配一个出口代理，让 `git` 走代理（`.env` 里的 `EGRESS_PROXY_URL` 只作用于站点的
+  抓取，不影响 `git`；要给 git 单独设 `git config --global http.proxy`）。
